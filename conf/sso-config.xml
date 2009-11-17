@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mule xmlns="http://www.mulesource.org/schema/mule/core/2.1"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:spring="http://www.springframework.org/schema/beans"
+	xmlns:stdio="http://www.mulesource.org/schema/mule/stdio/2.1" xmlns:vm="http://www.mulesource.org/schema/mule/vm/2.1"
+	xmlns:jdbc="http://www.mulesource.org/schema/mule/jdbc/2.1" xmlns:http="http://www.mulesource.org/schema/mule/http/2.1"
+	xmlns:file="http://www.mulesource.org/schema/mule/file/2.1"
+
+	xsi:schemaLocation="
+       http://www.springframework.org/schema/beans http://www.springframework.org/schema/beans/spring-beans-2.5.xsd
+       http://www.mulesource.org/schema/mule/core/2.1 http://www.mulesource.org/schema/mule/core/2.1/mule.xsd
+       http://www.mulesource.org/schema/mule/stdio/2.1 http://www.mulesource.org/schema/mule/stdio/2.1/mule-stdio.xsd
+       http://www.mulesource.org/schema/mule/vm/2.1 http://www.mulesource.org/schema/mule/vm/2.1/mule-vm.xsd
+       http://www.mulesource.org/schema/mule/jdbc/2.1 http://www.mulesource.org/schema/mule/jdbc/2.1/mule-jdbc.xsd
+       http://www.mulesource.org/schema/mule/http/2.1 http://www.mulesource.org/schema/mule/http/2.1/mule-http.xsd
+       http://www.mulesource.org/schema/mule/file/2.1 http://www.mulesource.org/schema/mule/file/2.1/mule-file.xsd
+       ">
+	<spring:bean id="dataSource" name="dataSource"
+		class="org.apache.commons.dbcp.BasicDataSource">
+		<spring:property name="driverClassName" value="com.mysql.jdbc.Driver" />
+		<spring:property name="url"
+			value="jdbc:mysql://localhost/MULE_USERS?autoReconnect=true" />
+		<spring:property name="username" value="root" />
+		<spring:property name="password" value="arie" />
+	</spring:bean>
+	<spring:bean id="configManager" name="configManager"
+		class="net.ariemurdianto.mule.sso.manager.DefaultConfigManager">
+	</spring:bean>
+	<spring:bean id="userManager" name="userManager"
+		class="net.ariemurdianto.mule.sso.manager.DefaultUserManager">
+		<spring:property name="dataSource">
+			<spring:ref local="dataSource" />
+		</spring:property>
+		<spring:property name="configManager">
+			<spring:ref local="configManager" />
+		</spring:property>
+	</spring:bean>
+	<spring:bean id="httpCheckProcessor"
+		class="net.ariemurdianto.mule.sso.service.DefaultHttpCheckProcessor">
+		<spring:property name="userManager">
+			<spring:ref local="userManager" />
+		</spring:property>
+	</spring:bean>
+	<spring:bean id="httpInsertProcessor"
+		class="net.ariemurdianto.mule.sso.service.DefaultHttpUpdateProcessor">
+		<spring:property name="userManager">
+			<spring:ref local="userManager" />
+		</spring:property>
+	</spring:bean>
+
+	<jdbc:connector name="jdbcConnector" pollingFrequency="10000"
+		dataSource-ref="dataSource">
+		<jdbc:query key="outboundInsertUser"
+			value="insert into users (username, password) values (#[map-payload:username], #[map-payload:password])" />
+		<jdbc:query key="outboundCheckCredential"
+			value="select * from users where username=#[map-payload:username]" />
+		<jdbc:query key="outboundDeleteUser"
+			value="delete from users where username=#[map-payload:username]"/>
+	</jdbc:connector>
+
+	<http:connector name="HttpConnector" enableCookies="true"
+		keepAlive="true" />
+	<stdio:connector name="stdioConnector"
+		messageDelayTime="1234" resourceBundle="dummy-messages" createMultipleTransactedReceivers="true" numberOfConcurrentTransactedReceivers="10000"/>
+
+
+	<file:connector name="errorWriter" outputAppend="true"
+		outputPattern="error-file.log" />
+
+	<custom-transformer name="stdinToString"
+		class="net.ariemurdianto.mule.sso.transformer.StdinToString"></custom-transformer>
+	<custom-transformer name="httpToStringInput"
+		class="net.ariemurdianto.mule.sso.transformer.HttpToStringInput"></custom-transformer>
+	<custom-transformer name="objectToString"
+		class="net.ariemurdianto.mule.sso.transformer.ObjectToString"></custom-transformer>
+	<custom-transformer name="stringToMap"
+		class="net.ariemurdianto.mule.sso.transformer.StringToMap"></custom-transformer>
+	
+	<model name="SSO">
+		<service name="credentialCheck">
+			<inbound>
+				<http:inbound-endpoint transformer-refs="httpToStringInput"
+					host="localhost" port="8123" path="services/checkCredential"
+					synchronous="true" keep-alive="true" />
+			</inbound>
+			<component>
+				<spring-object bean="httpCheckProcessor">
+				</spring-object>
+			</component>
+			<outbound>
+				<pass-through-router>
+					<vm:outbound-endpoint path="transformMessage"/>
+				</pass-through-router>
+			</outbound>
+		</service>
+		<service name="messageTransformer">
+			<inbound>
+				<vm:inbound-endpoint path="transformMessage"/>
+			</inbound>
+			<component class="net.ariemurdianto.mule.sso.service.DefaultSimpleReturn">
+			</component>
+		</service>
+	</model>
+	<model name="updateSSO">
+		<service name="credentialUpdate">
+			<inbound>
+				<http:inbound-endpoint transformer-refs="httpToStringInput"
+					host="localhost" port="8124" path="services/updateCredential" synchronous="true"
+					keep-alive="true" />
+			</inbound>
+			<component class="net.ariemurdianto.mule.sso.service.DefaultHttpUpdateProcessor">
+			</component>
+			<outbound>
+				<filtering-router>
+					<jdbc:outbound-endpoint transformer-refs="stringToMap" queryKey="outboundInsertUser" />
+					<and-filter>
+      					<payload-type-filter expectedType="java.lang.String"/>
+      					<regex-filter pattern="insert.*"/>
+    				</and-filter>
+				</filtering-router>
+				<filtering-router>
+					<jdbc:outbound-endpoint transformer-refs="stringToMap" queryKey="outboundDeleteUser" />
+					<and-filter>
+      					<payload-type-filter expectedType="java.lang.String"/>
+      					<regex-filter pattern="delete.*"/>
+    				</and-filter>
+				</filtering-router>
+			</outbound>
+		</service>
+	</model>
+</mule>
